@@ -80,7 +80,7 @@
    byte-swapped, so the whole keystream -- and with it every ChaCha20-Poly1305
    tag and every Noise handshake against a little-endian peer -- was wrong. Load
    the constant the way the key, counter and nonce are already loaded. */
-static void rats_chacha_load_tag(rats_chacha_ctx *x, const char *tag)
+static inline void rats_chacha_load_tag(rats_chacha_ctx *x, const char *tag)
 {
 #ifdef RATS_CHACHA_USE_VECTOR_MATH
     /* SSE2-only path, which already assumes a little-endian host (see
