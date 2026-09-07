@@ -1,7 +1,7 @@
 /**
  * LibRats Node.js native addon.
  *
- * N-API wrapper over the canonical C ABI in src/bindings/rats.h. Callbacks fire
+ * N-API wrapper over the canonical C ABI in src/librats/bindings/rats.h. Callbacks fire
  * on librats' internal reactor thread, so every native callback marshals into
  * the JS thread with a Napi::ThreadSafeFunction (TSFN). Per-channel / per-topic
  * / per-json-type handlers are kept in maps owned by the RatsNode instance and

@@ -97,12 +97,12 @@ Projects and companies building on librats:
 - **Node.js**: N-API native addon (`RatsNode`) with TypeScript definitions ([npm package](https://www.npmjs.com/package/librats))
 - **Java/Android**: JNI wrapper with a high-level Java API (`com.librats.RatsNode`)
 - **Python**: ctypes package with a Pythonic `RatsNode`
-- **React Native**: [`react-native/`](react-native) — a [Nitro Modules](https://nitro.margelo.com) HybridObject implemented once in C++ and shared by iOS and Android, so there is no JNI bridge and no Swift wrapper to keep in sync. Covers messaging, peer events, file transfer and pub/sub
-- **iOS**: [`ios/`](ios) — the core cross-compiles to an `XCFramework` (device + simulator) and Swift imports the C ABI directly as `import LibRats`, no shim needed
+- **React Native**: [`react-native/`](react-native), a [Nitro Modules](https://nitro.margelo.com) HybridObject written once in C++ and shared by iOS and Android. Messaging, peer events, file transfer and pub/sub
+- **iOS**: [`ios/`](ios), the core built as an `XCFramework`; Swift imports the C ABI directly with `import LibRats`
 
 ## 🚀 Quick Start
 
-Everything in librats revolves around one idea: a small, predictable core (`Node`) plus **opt-in subsystems** you attach explicitly. A bare `Node` is just the secure transport — an encrypted channel (Noise_XX) with a self-certifying peer identity, manual dialing, and raw channel messaging. Everything else — discovery, pub/sub, typed messaging, file transfer, liveness, NAT port mapping, reconnection — is a `Subsystem` you add **before** `start()`. You pay only for what you attach, and the core stays small and easy to reason about.
+One idea runs through the whole library: a small core (`Node`) plus **opt-in subsystems**. A bare `Node` is the secure transport, manual dialing and raw channel messaging. Everything else is a `Subsystem` you add **before** `start()`.
 
 ```cpp
 librats::NodeConfig config;
@@ -266,8 +266,10 @@ files->on_offer([&](const FileTransfer::Offer& offer) {
         files->reject(offer.from, offer.id);
 });
 files->on_progress([](const FileTransfer::Progress& p) { /* p.bytes_transferred / p.total_bytes */ });
-files->on_complete([](uint64_t id, bool ok, const std::string& path) {
-    std::cout << "[file] transfer " << id << (ok ? " complete: " : " FAILED: ") << path << "\n";
+// Transfer ids are allocated by the sender, so a (peer, id) pair is the unique key.
+files->on_complete([](const PeerId& peer, uint64_t id, bool ok, const std::string& path) {
+    std::cout << "[file] transfer " << id << " from " << peer.short_hex()
+              << (ok ? " complete: " : " FAILED: ") << path << "\n";
 });
 
 node.start();
@@ -290,14 +292,14 @@ config.data_dir = "./node-data";                 // persist the Noise keypair �
 
 Node node(config);
 node.start();
-// node.local_id() is the node's static public key — peers authenticate it during the handshake.
+// node.local_id() is derived from the node's static public key; the handshake proves the peer holds the private key.
 ```
 
-### 7. NAT traversal (UPnP / NAT-PMP)
+### 7. NAT traversal: port mapping, hole punching, relay
 
-Attach `PortMappingService` to forward the listen port automatically on startup. Both UPnP IGD and NAT-PMP are attempted in parallel; whichever the router supports wins. The mappings are refreshed automatically and removed on `stop()`.
+Three subsystems form a ladder. Each one exists for the networks the previous rung cannot reach, and they hand off to each other on their own.
 
-The port is forwarded under **both protocols the node is listening on** — TCP *and* UDP, since both transports share one port. UDP matters most: it is the dialer's first choice, so a TCP-only mapping would leave inbound peers on the TCP fallback. A node configured with only one transport gets only that one mapped.
+**Rung 1: port mapping.** `PortMappingService` asks the router to forward the listen port on startup, over UPnP IGD and NAT-PMP in parallel. Both TCP and UDP are mapped, since both transports share one port. Mappings are refreshed automatically and removed on `stop()`.
 
 ```cpp
 #include <librats/node/node.h>
@@ -315,7 +317,7 @@ if (auto pub = portmap->mapped_public_address(PortMapProtocol::UDP))
     std::cout << "public udp: " << pub->first << ":" << pub->second << "\n";
 ```
 
-Where the router forwards nothing — carrier-grade NAT, a locked-down office network, a router with UPnP off — `HolePunch` is the other half. Two peers that cannot be dialed can still reach each other if they dial *at the same moment*: each side's outbound packet opens the mapping the other side's needs. The moment is agreed through a peer both already have, and timed from that relayed round trip rather than from any clock.
+**Rung 2: hole punching.** Where the router forwards nothing (carrier-grade NAT, an office network, UPnP switched off), two peers that cannot be dialed can still reach each other if they dial *at the same moment*: each side's outbound packet opens the mapping the other side needs. `HolePunch` arranges that moment through a peer both already have and times it from the relayed round trip, so no clocks need to agree. The node learns the external endpoint to advertise from the peers it already has rather than from a STUN server.
 
 ```cpp
 #include <librats/node/node.h>
@@ -339,32 +341,27 @@ switch (node.nat_status().udp_mapping()) {
 punch->punch(peer_id);   // non-blocking; success arrives as an ordinary peer-connected event
 ```
 
-Every node involved must have the subsystem attached — including the one carrying the rendezvous, which forwards a few dozen bytes per punch and only ever to peers it already holds. The C ABI mirrors this as `rats_enable_hole_punch()` / `rats_punch_peer()` / `rats_nat_mapping()`.
+Every node involved needs the subsystem, including the one carrying the rendezvous (it forwards a few dozen bytes per punch, only to peers it already holds). You rarely call `punch()` yourself: attach `PeerExchange` alongside and a PEX-learned peer whose address will not dial is punched automatically.
 
-Calling `punch()` by hand assumes you know *which* peer is unreachable — which is the discovery half of the problem, not the traversal half. Attach `PeerExchange` alongside and it answers that on its own: PEX learns peers as an id *plus* an address, and when that address will not dial (exactly what a NATed peer looks like) it hands the id to `HolePunchService`, the capability `HolePunch` publishes. Nothing to wire up — attach both and unreachable peers start getting punched:
-
-```cpp
-node.add_subsystem(std::make_unique<HolePunch>());     // provides HolePunchService
-node.add_subsystem(std::make_unique<PeerExchange>());  // resolves it, if present
-```
-
-Some pairs cannot be punched at all: a symmetric NAT gives a fresh mapping per destination, so no endpoint either side can advertise is the one the other's packets would arrive on. `Relay` is the last rung — it routes the connection itself through a node both ends already reach.
-
-The relayed thing is a **byte stream**, not a message, so it becomes an ordinary `Connection`: the Noise handshake runs **end to end** and the relay moves ciphertext it cannot read, cannot forge and cannot replay. Every subsystem — pub/sub, file transfer, PEX — works over a relayed peer without a line of its own, and `PeerInfo::transport` is the only thing that says the path is not direct.
+**Rung 3: relay.** A symmetric NAT gives a fresh mapping per destination, so no endpoint either side can advertise is the one the other's packets would arrive on. For those pairs `Relay` routes the connection itself through a node both ends already reach. What is relayed is a **byte stream**, so it becomes an ordinary `Connection`: the Noise handshake runs end to end and the relay moves ciphertext it cannot read or forge. Every subsystem works over a relayed peer unchanged; `PeerInfo::transport` is the only thing that says the path is not direct.
 
 ```cpp
 #include <librats/subsystems/relay.h>
+#include <librats/subsystems/hole_punch.h>
+#include <librats/subsystems/port_mapping_service.h>
+
 
 Relay::Config relay_config;
-relay_config.serve = true;   // ALSO carry other peers' connections — off by default
+relay_config.serve = true;   // ALSO carry other peers' connections; off by default
 
 node.add_subsystem(std::make_unique<Relay>(relay_config));  // provides RelayService
 node.add_subsystem(std::make_unique<HolePunch>());          // escalates to it on failure
+node.add_subsystem(std::make_unique<PeerExchange>());       // resolves it, if present
 ```
 
-Attach both and the ladder runs itself: a punch that cannot work hands the target to `RelayService`, and a circuit that comes up asks `HolePunchService` to try again — now that the two ends are peers they can arrange a punch over the very circuit carrying them. If it lands, the peer table prefers the direct link at *both* ends and swaps the route with no disconnect event, so the application never sees the seam.
+Attach both and the ladder runs itself: a punch that cannot work hands the target to the relay, and a circuit that comes up keeps trying to punch over the very circuit carrying it. If a direct link lands, the peer table swaps the route at both ends with no disconnect event.
 
-Serving as a relay is opt-in because, unlike a hole-punch rendezvous, it spends real bandwidth on somebody else's traffic. A serving node is protected by an end-to-end credit window that bounds what one circuit can make it hold, by forwarding only between peers it already holds (it never dials and never resolves an address, so it cannot become an open reflector), by refusing to chain circuits, and by per-circuit byte and duration caps. The C ABI mirrors this as `rats_enable_relay()` / `rats_connect_via_relay()`.
+Serving as a relay is opt-in because it spends real bandwidth on somebody else's traffic. A serving node forwards only between peers it already holds (it never dials, so it cannot become an open reflector), refuses to chain circuits, bounds each circuit with an end-to-end credit window and caps it by bytes and duration. The C ABI mirrors the ladder as `rats_enable_port_mapping()`, `rats_enable_hole_punch()` / `rats_punch_peer()` / `rats_nat_mapping()` and `rats_enable_relay()` / `rats_connect_via_relay()`. See [ARCHITECTURE.md](ARCHITECTURE.md) for how the pieces fit.
 
 ### 8. Peer discovery (DHT + mDNS) and reconnection
 
@@ -443,9 +440,11 @@ bool start();                  // open listener + reactors + subsystems; false i
 void stop();                   // stop subsystems (reverse order), close connections, join
 
 // Identity & protocol
-const PeerId&      local_id() const;          // our self-certifying id (== public key)
+const PeerId&      local_id() const;          // our self-certifying id (derived from the public key)
 uint16_t           listen_port() const;       // actual bound port (when config requested 0)
 const std::string& protocol() const;          // app protocol id bound into the handshake
+uint8_t            transports() const;        // bitmask of the transports actually running
+const NatStatus&   nat_status() const;        // what peers report about our own NAT (see §7)
 
 // Subsystems (attach BEFORE start(); the node owns them and returns a non-owning pointer)
 template <class T> T* add_subsystem(std::unique_ptr<T> subsystem);
@@ -456,7 +455,7 @@ MessageJson*          json();                 // shortcut for subsystem<MessageJ
 void   connect(const Address& address);
 void   connect(const std::string& host, uint16_t port);
 size_t peer_count() const;
-std::vector<PeerInfo> peers() const;          // snapshot: id, addresses, direction
+std::vector<PeerInfo> peers() const;          // snapshot: id, addresses, direction, transport (direct or relayed)
 std::optional<Peer>   peer(const PeerId& id);
 std::vector<Address>  observed_addresses() const;  // our addresses as peers report them
 
@@ -475,6 +474,7 @@ bool peer_writable(const PeerId& id) const;      // the same question, without s
 void on_peer_connected(PeerEventHandler cb);     // (const Peer&)
 void on_peer_disconnected(PeerDisconnectHandler cb);  // (const PeerId&, CloseReason)
 void on_peer_writable(PeerEventHandler cb);      // (const Peer&) — room again
+void on_dial_failed(DialFailedHandler cb);       // (const Address&) — a connect() that never came up
 void on(std::string_view channel, MessageRouter::Handler cb);  // (const Peer&, ByteView)
 
 // Node-scoped coordination shared with subsystems
@@ -510,15 +510,28 @@ and the `rats_close_reason_t` handed to `rats_on_peer_disconnected()`.
 
 ```cpp
 struct NodeConfig {
+    // Listening
     uint16_t    listen_port = 0;            // 0 = ephemeral; ignored if !enable_listen
     bool        enable_listen = true;       // false = dial-only (no listener)
     std::string bind_address = "";          // "" / "::" dual-stack, "0.0.0.0", or an IP literal
+
+    // Transports (see "Two transports, one API")
+    bool          enable_tcp = true;
+    bool          enable_udp = true;
+    TransportKind preferred_transport = TransportKind::Udp;  // tried first
+    uint32_t      transport_fallback_ms = 1200;              // start the other one after this; 0 = never
+
+    // Resources
     size_t      reactor_threads = 1;        // 1 handles thousands of peers; more shards cores
     size_t      max_peers = 0;              // 0 = unlimited (guards inbound only)
+    size_t      send_queue_limit = 0;       // per-peer send queue before SlowConsumer; 0 = 8 MiB
+
+    // Identity & security
     enum class Security { Noise, Plaintext };
     Security    security = Security::Noise; // Noise_XX by default
     std::string protocol = "librats/1.0";   // app id bound into the handshake; must match to connect
     std::string data_dir = "";              // "" = ephemeral identity; else identity.key persists
+
     bool        enable_network_monitor = true;  // watch host network changes → NetworkChanged
 };
 ```
@@ -541,6 +554,7 @@ Each subsystem is attached with `node.add_subsystem(std::make_unique<T>(...))` *
 | `Relay` | `subsystems/relay.h` | Last-resort connectivity: the connection itself is carried through a peer both ends reach, still encrypted end to end |
 | `PeerExchange` | `subsystems/peer_exchange.h` | PEX: gossip known peer addresses to grow the mesh |
 | `StorageManager` | `storage/storage.h` | Distributed key-value store (requires `RATS_STORAGE`) |
+| `Bittorrent` | `subsystems/bittorrent.h` | BitTorrent client sharing the node's DHT: magnets, .torrent files, uTP, MSE/PE (requires `RATS_SEARCH_FEATURES`; attach after `DhtDiscovery`) |
 
 ### C API (`bindings/rats.h`)
 
@@ -578,7 +592,16 @@ int main(void) {
 }
 ```
 
-Key entry points: `rats_create` / `rats_create_config` / `rats_config_default` / `rats_destroy`, `rats_start` / `rats_stop`, `rats_connect`, `rats_send` / `rats_broadcast`, `rats_on` / `rats_on_peer_connected` / `rats_on_peer_disconnected` / `rats_on_peer_writable`, `rats_peer_writable` / `rats_close_reason_str`, `rats_enable_{dht,mdns,pubsub,json,file_transfer,ping,reconnect,port_mapping}`, `rats_subscribe` / `rats_publish`, `rats_on_json` / `rats_send_json`, `rats_send_file` / `rats_accept_file`, `rats_peer_ids`, `rats_local_id`, `rats_protocol`, `rats_version` / `rats_version_string` / `rats_git_describe` / `rats_abi`, `rats_set_log_level` / `rats_set_log_file`.
+The C API covers the same ground as the C++ one, subsystem by subsystem:
+
+| Area | Calls |
+|------|-------|
+| Lifecycle | `rats_create` / `rats_create_config` / `rats_config_default` / `rats_destroy`, `rats_start` / `rats_stop` |
+| Peers & messaging | `rats_connect`, `rats_send` / `rats_broadcast`, `rats_on`, `rats_on_peer_connected` / `rats_on_peer_disconnected` / `rats_on_peer_writable`, `rats_peer_writable`, `rats_peer_ids`, `rats_peer_count`, `rats_close_reason_str` |
+| Enable subsystems | `rats_enable_{dht,mdns,pubsub,json,file_transfer,ping,reconnect,port_mapping,hole_punch,relay}` |
+| Pub/sub, JSON, files | `rats_subscribe` / `rats_publish`, `rats_on_json` / `rats_send_json`, `rats_send_file` / `rats_send_directory` / `rats_accept_file` / `rats_reject_file` |
+| NAT | `rats_punch_peer`, `rats_nat_mapping`, `rats_connect_via_relay` |
+| Info & logging | `rats_local_id`, `rats_protocol`, `rats_listen_port`, `rats_version` / `rats_version_string` / `rats_abi`, `rats_set_log_level` / `rats_set_log_file` |
 
 ## 🏢 Architecture
 
@@ -596,18 +619,20 @@ Key entry points: `rats_create` / `rats_create_config` / `rats_config_default` /
 │ │ DhtDiscovery│ │MdnsDiscovery│ │PingService │ │PortMapping │      │
 │ │  (Mainline)│ │  (local)   │ │ (liveness) │ │UPnP/NAT-PMP │      │
 │ └────────────┘ └────────────┘ └────────────┘ └────────────┘       │
-│ ┌─────────────────────────┐ ┌─────────────────────────────┐       │
-│ │ PeerExchange (PEX)       │ │ StorageManager (RATS_STORAGE)│     │
-│ └─────────────────────────┘ └─────────────────────────────┘       │
+│ ┌────────────┐ ┌────────────┐ ┌────────────┐ ┌────────────┐       │
+│ │ HolePunch  │ │   Relay    │ │PeerExchange│ │StorageMgr  │       │
+│ │ (UDP punch)│ │ (circuits) │ │   (PEX)    │ │(RATS_STORAGE)│     │
+│ └────────────┘ └────────────┘ └────────────┘ └────────────┘       │
 ├──────────────────────────────────────────────────────────────────┤
 │ Node core                                                         │
-│   peer directory · message router · EventBus · ServiceRegistry    │
+│   peer directory · message router · dialer · EventBus · services  │
 ├──────────────────────────────────────────────────────────────────┤
 │ Security  — Noise_XX (Curve25519 + ChaCha20-Poly1305) / plaintext │
 │             over a self-certifying PeerId                          │
 ├──────────────────────────────────────────────────────────────────┤
 │ Transport — shared-nothing reactor pool, per-connection state      │
-│             machine, length-prefixed wire framing                  │
+│             machine, length-prefixed framing, over one Link:       │
+│             TCP socket · reliable UDP stream · relayed circuit     │
 ├──────────────────────────────────────────────────────────────────┤
 │ I/O multiplexing — epoll (Linux) · kqueue (macOS/BSD) · IOCP (Win) │
 ├──────────────────────────────────────────────────────────────────┤
@@ -687,8 +712,10 @@ node.start();   // discovery uses a hash derived from your protocol identity
 
 **Legend:** ✅ Fully Supported · 🔶 In Development · 📋 Planned/Future/Research
 
+Need another language? Anything with a C FFI (Rust, Go, C#, Zig, …) binds [`rats.h`](src/librats/bindings/rats.h) the same way the shipped bindings do: one opaque pointer, no C++ across the boundary.
+
 ### Prerequisites
-- **CMake 3.10+**
+- **CMake 3.14+**
 - **C++17 compatible compiler**:
   - GCC 7+ (Linux, MinGW)
   - Clang 5+ (macOS, Linux)
@@ -741,8 +768,9 @@ cmake .. -DCMAKE_BUILD_TYPE=Release
 | `RATS_CROSSCOMPILING` | `OFF` | Force cross-compilation flags |
 | `RATS_SHARED_LIBRARY` | `OFF` | Build as shared library (.dll/.so/.dylib) |
 | `RATS_STATIC_LIBRARY` | `ON` | Build as static library (.a/.lib) |
-| `RATS_SEARCH_FEATURES` | `OFF` | Enable Rats Search features (BitTorrent / DHT spider) |
+| `RATS_SEARCH_FEATURES` | `OFF` | Enable the BitTorrent subsystem and DHT spider mode |
 | `RATS_STORAGE` | `OFF` | Enable the distributed key-value storage subsystem |
+| `RATS_INSTALL` | `ON` | Generate `install()` rules and the `rats::rats` CMake package |
 
 **Examples:**
 
@@ -778,7 +806,7 @@ See [`ios/README.md`](ios/README.md) for how to consume that from Xcode, and
 #### Method 1: CMake FetchContent (recommended)
 
 ```cmake
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.14)
 project(MyP2PApp)
 set(CMAKE_CXX_STANDARD 17)
 
@@ -833,14 +861,22 @@ target_link_libraries(my_p2p_app PRIVATE rats::rats)
 (The port lives in [`ports/librats/`](ports/librats) in this repository and can also be used as an
 overlay port with `vcpkg install librats --overlay-ports=<path-to-librats>/ports`.)
 
+#### Method 4: Conan
+
+A [`conanfile.py`](conanfile.py) is included. It is not on Conan Center, so create the package from a checkout (the version is taken from the command line):
+
+```bash
+conan create . --version 2.3.7        # options: shared, bindings, search_features, storage
+```
+
 #### Required System Libraries
 
 When linking against a pre-built librats, add these system libraries:
 
 | Platform | Required Libraries |
 |----------|-------------------|
-| **Windows** | `ws2_32`, `iphlpapi`, `bcrypt` |
-| **Linux** | `pthread` |
+| **Windows** | `ws2_32`, `iphlpapi`, `bcrypt`, `advapi32` |
+| **Linux** | `pthread` (via `Threads::Threads`) |
 | **macOS** | `pthread` |
 | **Android** | `log` |
 | **iOS** | — (the `XCFramework` carries what it needs) |
@@ -867,17 +903,17 @@ After building, you'll find:
 
 ### The reference application
 
-`rats-client` (built from `src/main.cpp`) wires up the full set of subsystems so every capability can be exercised from one binary:
+`rats-client` (built from `src/main.cpp`, on by default via `RATS_BUILD_CLIENT`) wires up every subsystem so each capability can be tried from one binary. Everything is on unless switched off:
 
 ```bash
-# Terminal 1: start a node on port 8080 with DHT + mDNS discovery
-./build/bin/rats-client 8080 --dht --mdns
+# Terminal 1: a node on port 8080 with DHT + mDNS discovery, port mapping, hole punching, relay, PEX
+./build/bin/rats-client 8080
 
-# Terminal 2: start a second node and dial the first
-./build/bin/rats-client 8081 --connect 127.0.0.1 8080
+# Terminal 2: a second node that dials the first (numeric IP), with the DHT switched off
+./build/bin/rats-client 8081 --connect 127.0.0.1 8080 --no-dht
 ```
 
-Options: `--bind <addr>`, `--data <dir>` (stable identity + reconnect store), `--connect <host> <port>` (repeatable), `--dht`, `--mdns`, `--upnp`, `--reconnect`, `--no-ping`. Pub/sub, typed JSON messaging and file transfer are always on. Type `/help` once running for the interactive command list (`/peers`, `/connect`, `/sub`, `/pub`, `/msg`, `/file`, …).
+Options: `--bind <addr>`, `--data <dir>` (stable identity + reconnect store), `--connect <ip> <port>` (repeatable), `--serve-relay` (carry other peers' circuits), and `--no-dht`, `--no-mdns`, `--no-upnp`, `--no-punch`, `--no-relay`, `--no-pex`, `--no-reconnect`, `--no-ping` to switch a subsystem off (`--no-bittorrent`, `--bt-port` with `RATS_SEARCH_FEATURES`). Type `/help` once running for the interactive commands: `/peers`, `/connect`, `/sub`, `/unsub`, `/pub`, `/msg`, `/file`, `/punch`, `/relay`, `/reconnect`, `/dhtfind`, `/quit`, and any other line is broadcast as chat.
 
 ### Runnable examples
 
@@ -904,38 +940,6 @@ cmake -B build -DRATS_BUILD_EXAMPLES=ON && cmake --build build -j
 
 See [`examples/README.md`](examples/README.md) for the full list and per-example usage.
 
-### Minimal chat
-
-```cpp
-#include <librats/node/node.h>
-#include <librats/subsystems/message_json.h>
-#include <iostream>
-
-using namespace librats;
-
-int main() {
-    Node node(NodeConfig{/*listen_port=*/8080});
-    node.add_subsystem(std::make_unique<MessageJson>());
-
-    node.json()->on("chat", [](const PeerId& from, const librats::Json& d) {
-        std::cout << "[" << d.value("user", "?") << "]: " << d.value("text", "") << "\n";
-    });
-
-    node.start();
-
-    const std::string user = "User_" + node.local_id().short_hex();
-    std::cout << "🐀 librats chat — type messages, 'quit' to exit\n";
-
-    std::string line;
-    while (std::getline(std::cin, line) && line != "quit") {
-        if (!line.empty())
-            node.json()->send("chat", librats::Json{{"user", user}, {"text", line}});
-    }
-    node.stop();
-    return 0;
-}
-```
-
 ## 🔧 Persistent State
 
 When a node is given a `data_dir`, it co-locates its persistent state there:
@@ -958,7 +962,7 @@ and CPU are the scarce things.
 `-O3`, Node.js v24.18.0, js-libp2p 3.3.8. Both sides run **TCP + Noise_XX** over
 loopback, 3 runs per cell, median reported.
 
-| Metric | librats (JS) | js-libp2p (JS) | librats advantage |
+| Metric | librats (Node.js binding) | js-libp2p | librats advantage |
 |--------|-----------------|----------------|-------------------|
 | **Memory, node started** | **5.0 MB** | 110.9 MB | **22x less** |
 | **Memory per connected peer** | **8.1 KB** | 475.1 KB | **59x less** |
@@ -971,24 +975,6 @@ loopback, 3 runs per cell, median reported.
 | **Bulk throughput (64 KiB)** | 600 MB/s | **603 MB/s** | *parity* |
 | **CPU per GB** | **3.27 s/GB** | 4.68 s/GB | **1.4x less** |
 | **Runtime dependencies** | **none** |  139 npm packages, 66 MB | — |
-
-## Why Choose librats?
-
-### **Performance**
-- **Native C++17**: maximum performance with minimal overhead
-- **Shared-nothing reactor**: no cross-thread locking on the connection hot path
-- **Platform-optimal I/O**: epoll / kqueue / IOCP behind one abstraction
-
-### **Reliability**
-- **Comprehensive testing**: unit and integration tests across all components
-- **Memory safety**: RAII and smart pointers throughout
-- **Cross-platform**: consistent behaviour across Windows, Linux, and macOS
-
-### **Developer Experience**
-- **Small, predictable core**: a bare `Node` does exactly one thing — secure transport
-- **Composable subsystems**: attach only the capabilities you need
-- **Self-certifying identity**: authentication with no PKI or central authority
-- **Modern C++**: takes advantage of C++17 features
 
 ## Contributing
 

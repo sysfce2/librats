@@ -30,7 +30,7 @@ By participating in this project, you agree to maintain a respectful and inclusi
 
 Before contributing, ensure you have:
 
-- **CMake 3.10+** installed
+- **CMake 3.14+** installed
 - **C++17 compatible compiler**:
   - GCC 7+ (Linux, MinGW)
   - Clang 5+ (macOS, Linux)
@@ -77,10 +77,14 @@ ctest --output-on-failure
 | `RATS_BUILD_CLIENT` | `ON` | Build the `rats-client` reference application |
 | `RATS_BUILD_EXAMPLES` | `OFF` | Build the `examples/` programs |
 | `RATS_ENABLE_ASAN` | `OFF` | Enable AddressSanitizer |
+| `RATS_ENABLE_TSAN` | `OFF` | Enable ThreadSanitizer (mutually exclusive with ASAN) |
 | `RATS_BINDINGS` | `ON` | Enable C API bindings |
+| `RATS_INSTALL` | `ON` | Generate install/export targets (`find_package(rats)`) |
+| `RATS_CROSSCOMPILING` | `OFF` | Force cross-compilation flags |
 | `RATS_SHARED_LIBRARY` | `OFF` | Build as shared library |
 | `RATS_STATIC_LIBRARY` | `ON` | Build as static library |
 | `RATS_SEARCH_FEATURES` | `OFF` | Enable BitTorrent features |
+| `RATS_STORAGE` | `OFF` | Enable the distributed key-value storage subsystem |
 
 ### Debug Build with AddressSanitizer
 
@@ -307,7 +311,7 @@ Ensure your changes work on all platforms by checking CI results.
 
 2. **Create Pull Request** on GitHub
 
-3. **Fill out the PR template** with:
+3. **Describe in the PR**:
    - Clear description of changes
    - Related issue numbers
    - Testing performed
@@ -418,11 +422,14 @@ librats/
 │   ├── test_socket.cpp        # Socket tests
 │   └── ...
 ├── examples/                   # Focused, self-contained example programs
+├── bench/                      # Benchmark suites (see bench/README.md)
 ├── docs/                       # Doxygen config output + the project website
 ├── ports/librats/              # vcpkg port (portfile.cmake, vcpkg.json)
 ├── nodejs/                     # Node.js bindings
 ├── python/                     # Python bindings
-├── android/                    # Android integration
+├── android/                    # Android integration (JNI + Java API)
+├── react-native/               # React Native package (Nitro Modules, C++)
+├── ios/                        # iOS XCFramework build of the core
 ├── .github/workflows/          # CI configuration
 ├── CMakeLists.txt             # Build configuration
 └── README.md                  # Project documentation
@@ -436,7 +443,8 @@ librats/
 | Networking | `core/socket.{cpp,h}` | Cross-platform socket abstraction |
 | Transport | `transport/connection.{cpp,h}`, `transport/reactor.{cpp,h}` | Per-peer state machine + reactor threads |
 | Discovery | `dht/dht.{cpp,h}`, `mdns/mdns.{cpp,h}` | Peer discovery mechanisms |
-| NAT | `nat/stun.{cpp,h}`, `nat/port_mapping.{cpp,h}` | NAT traversal and port mapping |
+| NAT | `nat/stun.{cpp,h}`, `nat/port_mapping.h`, `nat/upnp.{cpp,h}`, `nat/natpmp.{cpp,h}` | STUN client and UPnP / NAT-PMP port mapping |
+| NAT traversal | `subsystems/hole_punch.{cpp,h}`, `subsystems/relay.{cpp,h}`, `transport/relay_link.{cpp,h}` | UDP hole punching and relayed circuits |
 | Security | `crypto/noise.{cpp,h}`, `security/noise_security.{cpp,h}` | End-to-end encryption |
 | Messaging | `subsystems/pubsub.{cpp,h}` | GossipSub pub-sub |
 | Transfer | `subsystems/file_transfer.{cpp,h}` | File/directory transfer |
@@ -465,14 +473,16 @@ When contributing language bindings:
 - **Node.js**: `nodejs/` - Native addon with TypeScript support
 - **Python**: `python/` - ctypes-based wrapper
 - **Android/Java**: `android/` - JNI integration
+- **React Native**: `react-native/` - one C++ Nitro Modules `HybridObject` shared by iOS and Android
+- **iOS**: `ios/` - `XCFramework` build of the core; Swift imports the C ABI directly
 
 ## Documentation
 
 ### Types of Documentation
 
 1. **API Documentation**: Doxygen comments in headers
-2. **Usage Examples**: In `README.md` and `docs/`
-3. **Tutorials**: Step-by-step guides in `docs/`
+2. **Usage Examples**: In `README.md` and the runnable programs in `examples/`
+3. **Architecture**: `ARCHITECTURE.md` — the layers, the subsystem contract, the threading model
 
 ### Writing Documentation
 
@@ -494,11 +504,7 @@ If you have questions about contributing:
 
 1. Check existing issues and discussions
 2. Open a new issue with the `question` label
-3. Read the documentation in `docs/`
+3. Read `README.md` and `ARCHITECTURE.md`
 
 Thank you for contributing to librats! 🐀
-
----
-
-*This contributing guide is adapted from open source best practices and customized for the librats project.*
 

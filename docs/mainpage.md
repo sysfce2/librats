@@ -13,10 +13,10 @@ ABI and language bindings.
 ## The model in one minute
 
 The entry point is librats::Node — a thin, secure transport **core**. On its own
-a Node gives you an encrypted TCP transport (Noise_XX), a self-certifying
-librats::PeerId, manual dialing, a peer directory, and raw channel messaging.
-Everything else — discovery, pub/sub, file transfer, NAT port mapping,
-reconnection — is an opt-in librats::Subsystem you attach with
+a Node gives you an encrypted transport (Noise_XX) over TCP or UDP, a
+self-certifying librats::PeerId, manual dialing, a peer directory, and raw
+channel messaging. Everything else — discovery, pub/sub, file transfer, NAT
+traversal, reconnection — is an opt-in librats::Subsystem you attach with
 `add_subsystem()` **before** `start()`. You pay only for what you attach.
 
 ```cpp
@@ -41,7 +41,7 @@ int main() {
     });
 
     // typed JSON messages (via the MessageJson subsystem)
-    node.json()->on("hello", [](const PeerId& from, const nlohmann::json& j) {
+    node.json()->on("hello", [](const PeerId& from, const librats::Json& j) {
         std::printf("hello from %s: %s\n", from.short_hex().c_str(),
                     j.value("text", "").c_str());
     });
@@ -67,7 +67,7 @@ int main() {
 | Surface | API | Payload |
 |---------|-----|---------|
 | Raw channel | `node.on/send/broadcast(channel, …)` | bytes |
-| Typed JSON | `node.json()->on/send(type, …)` (librats::MessageJson) | nlohmann::json |
+| Typed JSON | `node.json()->on/send(type, …)` (librats::MessageJson) | librats::Json |
 | Pub/sub topics | librats::PubSub `subscribe/publish` | bytes, GossipSub mesh |
 
 ## Subsystems
@@ -79,7 +79,12 @@ int main() {
 - librats::FileTransfer — streaming file/directory transfer with integrity
 - librats::PingService — liveness / RTT probing
 - librats::PortMappingService — automatic UPnP IGD + NAT-PMP port forwarding
+- librats::HolePunch — UDP hole punching through a shared peer (provides librats::HolePunchService)
+- librats::Relay — last-resort connectivity: the connection is carried through a peer both ends reach, still encrypted end to end (provides librats::RelayService)
+- librats::PeerExchange — PEX: grow the mesh from peers' peers
 - librats::ReconnectionService — re-dial dropped peers with backoff
+- librats::StorageManager — distributed key-value store (requires `RATS_STORAGE`)
+- librats::Bittorrent — BitTorrent client sharing the node's DHT (requires `RATS_SEARCH_FEATURES`)
 
 ## Security
 
@@ -99,11 +104,15 @@ enabled with `rats_enable_*()` before `rats_start()`, and fallible calls return
 
 | Option | Description |
 |--------|-------------|
-| `RATS_BUILD_TESTS` | Build unit tests (GoogleTest) |
-| `RATS_BINDINGS` | Build the C ABI |
-| `RATS_STORAGE` | Enable distributed key-value storage |
-| `RATS_SEARCH_FEATURES` | Enable BitTorrent features |
-| `RATS_SHARED_LIBRARY` | Build as a shared library |
+| `RATS_BUILD_TESTS` | Build unit tests (GoogleTest) — default ON |
+| `RATS_BUILD_CLIENT` | Build the `rats-client` reference application — default ON |
+| `RATS_BUILD_EXAMPLES` | Build the `examples/` programs — default OFF |
+| `RATS_BINDINGS` | Build the C ABI — default ON |
+| `RATS_INSTALL` | Generate install/export targets (`find_package(rats)`) — default ON |
+| `RATS_STORAGE` | Enable distributed key-value storage — default OFF |
+| `RATS_SEARCH_FEATURES` | Enable BitTorrent features — default OFF |
+| `RATS_SHARED_LIBRARY` / `RATS_STATIC_LIBRARY` | Library linkage — default static |
+| `RATS_ENABLE_ASAN` / `RATS_ENABLE_TSAN` | Sanitizer builds (mutually exclusive) — default OFF |
 
 ## License
 

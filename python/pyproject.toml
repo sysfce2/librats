@@ -44,10 +44,10 @@ examples = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/your-org/librats"
-Documentation = "https://your-org.github.io/librats"
-Repository = "https://github.com/your-org/librats"
-"Bug Tracker" = "https://github.com/your-org/librats/issues"
+Homepage = "https://github.com/DEgITx/librats"
+Documentation = "https://librats.com"
+Repository = "https://github.com/DEgITx/librats"
+"Bug Tracker" = "https://github.com/DEgITx/librats/issues"
 
 [tool.setuptools.packages.find]
 include = ["librats_py*"]

@@ -45,5 +45,5 @@ two-node run:
 ```
 
 For a fuller, interactive application wiring up every subsystem at once, see the
-`rats-client` reference binary (`src/main.cpp`), also built when
-`RATS_BUILD_EXAMPLES=ON`.
+`rats-client` reference binary (`src/main.cpp`), built by default
+(`RATS_BUILD_CLIENT=ON`).

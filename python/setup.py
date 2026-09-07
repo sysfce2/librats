@@ -28,11 +28,11 @@ setup(
     description='Python bindings for librats P2P networking library',
     long_description=read_readme(),
     long_description_content_type='text/markdown',
-    url='https://github.com/your-org/librats',
+    url='https://github.com/DEgITx/librats',
     project_urls={
-        'Documentation': 'https://your-org.github.io/librats',
-        'Source': 'https://github.com/your-org/librats',
-        'Tracker': 'https://github.com/your-org/librats/issues',
+        'Documentation': 'https://librats.com',
+        'Source': 'https://github.com/DEgITx/librats',
+        'Tracker': 'https://github.com/DEgITx/librats/issues',
     },
     packages=find_packages(),
     classifiers=[
@@ -63,7 +63,6 @@ setup(
             'mypy',
         ],
         'examples': [
-            'asyncio',
             'click',
         ],
     },

@@ -23,17 +23,22 @@ remains the reference for *which* capabilities to expose.
 
 ## Install
 
+The package is not on npm yet; install it from a checkout of this repository:
+
 ```bash
-npm install react-native-librats react-native-nitro-modules
+# in react-native/: installs the Nitro codegen and runs it (the `prepare` script)
+npm install
+
+# in your app
+npm install <path-to-librats>/react-native react-native-nitro-modules
 cd ios && pod install
 ```
 
 Requires the New Architecture and Hermes (both are the default from React Native
 0.82, where the legacy bridge was removed).
 
-The published package ships Nitro's generated sources. Working from a clone of
-this repository, they are not in the tree — run `npm install` in `react-native/`
-first, which installs the codegen and runs it via the `prepare` script.
+Nitro's generated sources are not in the tree, which is why the `npm install`
+inside `react-native/` has to come first.
 
 ## Usage
 

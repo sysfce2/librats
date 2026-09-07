@@ -148,6 +148,19 @@ INPUT                  = docs/mainpage.md \
                          src/librats/subsystems/mdns_discovery.h \
                          src/librats/subsystems/port_mapping_service.h \
                          src/librats/subsystems/reconnection.h \
+                         src/librats/subsystems/hole_punch.h \
+                         src/librats/subsystems/hole_punch_service.h \
+                         src/librats/subsystems/relay.h \
+                         src/librats/subsystems/relay_service.h \
+                         src/librats/subsystems/peer_exchange.h \
+                         src/librats/subsystems/dht_service.h \
+                         src/librats/subsystems/bittorrent.h \
+                         src/librats/storage/storage.h \
+                         src/librats/node/nat_status.h \
+                         src/librats/node/dial_service.h \
+                         src/librats/node/circuit_service.h \
+                         src/librats/core/bytes.h \
+                         src/librats/util/json.h \
                          src/librats/nat/port_mapping.h \
                          src/librats/bindings/rats.h
 INPUT_ENCODING         = UTF-8

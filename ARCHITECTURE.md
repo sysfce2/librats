@@ -2,8 +2,8 @@
 
 librats is a high-performance C++17 peer-to-peer networking library. It gives you
 encrypted P2P connections, peer discovery (DHT, mDNS), NAT traversal, pub/sub
-messaging, file transfer and more — exposed to C++, C, Node.js, Java, Python and
-Android. This document explains the *shape* of the system: the layers, the key
+messaging, file transfer and more — exposed to C++, C, Node.js, Java, Python,
+React Native, Android and iOS. This document explains the *shape* of the system: the layers, the key
 classes, the threading model, and the one design rule that everything else
 follows.
 
@@ -83,8 +83,9 @@ it, and each is replaceable behind an interface.
    ├─────────────────────────────────────────────────────────────┤
    │  Subsystems (opt-in plugins)                                  │
    │    DhtDiscovery · MdnsDiscovery · PubSub · FileTransfer ·     │
-   │    PingService · PortMappingService · ReconnectionService ·  │
-   │    PeerExchange · MessageJson · StorageManager · Bittorrent   │
+   │    PingService · PortMappingService · HolePunch · Relay ·     │
+   │    ReconnectionService · PeerExchange · MessageJson ·         │
+   │    StorageManager · Bittorrent                                │
    ├───────────────┬─────────────────┬───────────────────────────┤
    │  ctx.network  │   ctx.events    │      ctx.services          │  ← the 3 contracts
    │ (PeerNetwork) │   (EventBus)    │   (ServiceRegistry)        │
@@ -200,10 +201,14 @@ it is the *only* place the two transports differ.
                     Connection  (framing · Noise · backpressure)
                          │
                        Link  ──  read / write / want_write / connect_completed
-                    ╱          ╲
-             TcpLink            UdpStreamLink ──▶ UdpStream ──▶ UdpMux
-        (one kernel socket        (reliability in user space, on ONE
-           per peer)                socket shared by every peer)
+                ╱          │          ╲
+         TcpLink     UdpStreamLink      RelayLink ──▶ Circuit
+    (one kernel      ──▶ UdpStream      (the stream borrowed from
+     socket per      ──▶ UdpMux          another peer's connection)
+     peer)           (reliability in
+                      user space, on ONE
+                      socket shared by
+                      every peer)
 ```
 
 - **`TcpLink`** is a thin translation of `recv`/`sendmsg`; the kernel provides
@@ -223,6 +228,14 @@ it is the *only* place the two transports differ.
   demultiplexes datagrams to streams by a random 32-bit connection id, admits
   inbound streams, drives every stream's timers from one 20 ms tick, and lingers
   a released stream briefly so the last bytes it owes still get delivered.
+- **`RelayLink` / `Circuit` (`src/librats/transport/relay_link.{h,cpp}`)** obtain the
+  same guarantee from *another peer's connection* rather than from a socket —
+  `TransportKind::Relay`. `Circuit` holds the bytes in flight and the end-to-end
+  credit window that bounds them; `RelayLink` is the adapter a `Connection`
+  drives. Neither knows the relay protocol, which lives entirely behind
+  `CircuitCarrier` in `subsystems/relay.cpp`. Because the whole Connection stack
+  runs unchanged over it, the Noise handshake is end-to-end and the relay only
+  ever moves ciphertext.
 
 **Why UDP is the default first choice.** One socket for every peer means a NAT
 holds *one* mapping rather than one per peer; the source port a peer observes is
@@ -315,6 +328,7 @@ here:
 | `Typed` (7) | `MessageJson` |
 | `Pex` (8) | `PeerExchange` |
 | `Punch` (9) | `HolePunch` (NAT hole-punch rendezvous, relayed peer→peer) |
+| `Relay` (10) | `Relay` (relayed circuits: a peer's connection carried through a third node) |
 
 **`MessageRouter` (`src/librats/wire/message_router.h`)** does the dispatch. Non-`App`
 frames go to the handler registered for their `MessageType`. `App` frames are
@@ -323,7 +337,7 @@ dispatched by their **channel**: the channel *name* is hashed (FNV-1a) to a stab
 registry. `node.on("chat", …)` is just `App` traffic with `channel = id("chat")`.
 
 > Note: DHT and mDNS are *not* in this table. They run their own separate
-> protocols (Kademlia/KRPC over UDP, multicast DNS) and don't use the node's TCP
+> protocols (Kademlia/KRPC over UDP, multicast DNS) and don't use the node's
 > message bus at all — they only call `ctx.network.connect()` to feed discovered
 > peers into the mesh.
 
@@ -499,13 +513,14 @@ Everything below is opt-in. Attach only what you need.
 
 | Subsystem | What it does | Talks via |
 |-----------|--------------|-----------|
-| **`DhtDiscovery`** (`subsystems/dht_discovery.h`) | Peer discovery over a Kademlia DHT — announces the node's TCP port under a discovery hash and searches for peers, then dials them. Dual-stack IPv4/IPv6 (BEP 32). Compatible with the BitTorrent Mainline DHT. | own UDP/KRPC network; `network.connect()`; publishes `DhtService` |
+| **`DhtDiscovery`** (`subsystems/dht_discovery.h`) | Peer discovery over a Kademlia DHT — announces the node's listen port (shared by TCP and UDP) under a discovery hash and searches for peers, then dials them. Dual-stack IPv4/IPv6 (BEP 32). Compatible with the BitTorrent Mainline DHT. | own UDP/KRPC network; `network.connect()`; publishes `DhtService` |
 | **`MdnsDiscovery`** (`subsystems/mdns_discovery.h`) | Local-network discovery via multicast DNS. Advertises the node as an mDNS service (named from its `PeerId`) and browses for the same service type, dialing what it finds. | multicast DNS; `network.connect()` |
 | **`PubSub`** (`subsystems/pubsub.h`) | A full **GossipSub** implementation: topic-based publish/subscribe with a per-topic mesh, eager forwarding, and lazy-pull recovery (IHAVE/IWANT). Runs its own heartbeat thread. | owns `MessageType::Gossip` |
 | **`FileTransfer`** (`subsystems/file_transfer.h`) | Bidirectional file/directory streaming with per-chunk CRC32 + whole-file SHA-256, backpressure, pause/resume/cancel, offer/accept, atomic finalize (temp file → rename). | owns `MessageType::FileChunk` |
 | **`PingService`** (`subsystems/ping_service.h`) | Liveness + RTT: periodically pings peers, who echo back, measuring round-trip time. | owns `MessageType::Ping` |
 | **`PortMappingService`** (`subsystems/port_mapping_service.h`) | Auto-forwards the listen port through the home router via **UPnP IGD** and **NAT-PMP** (both, in parallel). | NAT protocols; reads `listen_port()` |
 | **`HolePunch`** (`subsystems/hole_punch.h`) | UDP hole punching. Arranges through a shared peer that two NATed nodes dial each other at the same instant (the timing derived from the relayed round trip, as in DCUtR), so each side's outbound Syn opens the mapping the other's needs. The punch packet is the ordinary dial's Syn under a denser retry profile — no new wire format below the rendezvous. Published as `HolePunchService` so a discovery module can hand over an id it could not reach. | owns `MessageType::Punch`; uses `DialService` + `ExternalAddressService`; provides `HolePunchService` |
+| **`Relay`** (`subsystems/relay.h`) | The last rung of the connectivity ladder. For a pair no punch can reach (a symmetric NAT, a network that drops UDP and blocks inbound TCP), the connection itself is carried through a node both ends already reach. What is relayed is a *byte stream* that becomes an ordinary `Connection` over `RelayLink`, so the Noise handshake is end-to-end and the relay moves ciphertext it cannot read. Serving other peers is **off by default** (`Config::serve`); a serving node forwards only between peers it already holds, never chains circuits, and caps each one by bytes, duration and count, with an end-to-end credit window bounding what a circuit can make it hold. Published as `RelayService` (`connect_via_relay`); a circuit that comes up asks `HolePunchService` to try for a direct link, which then supersedes the relayed one with no disconnect event. | owns `MessageType::Relay`; uses `CircuitService` + `HolePunchService` (optional); provides `RelayService` |
 | **`ReconnectionService`** (`subsystems/reconnection.h`) | Re-dials dropped peers with exponential backoff; optionally persists targets (via `PeerBook`) so they survive a restart. | `network.peers()` + `on_dial_failed`; `network.connect()` |
 | **`PeerExchange`** (`subsystems/peer_exchange.h`) | Pull-only **PEX**: on connect, asks a peer for a random sample of *its* peers and dials the new ones. Grows the mesh organically; rate-limited to avoid dial storms. A PEX entry carries a peer's id *and* its address, so a dial that fails falls back to `HolePunchService` — the discovery half of hole punching. | owns `MessageType::Pex`; uses `HolePunchService` (optional) + `on_dial_failed` |
 | **`MessageJson`** (`subsystems/message_json.h`) | Familiar `on` / `once` / `off` / `send` API for **typed JSON** messages, named by a type string; the authenticated sender is the handshake `PeerId`. | owns `MessageType::Typed` |
@@ -597,16 +612,19 @@ Everything non-C++ is built on one C ABI: **`src/librats/bindings/rats.{h,cpp}`*
 - **Subsystems are opt-in via `rats_enable_*()`** calls made *before*
   `rats_start()` — `rats_enable_dht`, `rats_enable_mdns`, `rats_enable_pubsub`,
   `rats_enable_json`, `rats_enable_file_transfer`, `rats_enable_ping`,
-  `rats_enable_reconnect`, `rats_enable_port_mapping`. This mirrors C++'s
-  `add_subsystem` exactly.
+  `rats_enable_reconnect`, `rats_enable_port_mapping`, `rats_enable_hole_punch`,
+  `rats_enable_relay`. This mirrors C++'s `add_subsystem` exactly.
 - **Error model:** fallible calls return a `rats_error_t` (`RATS_OK == 0`;
   non-zero is an error — e.g. `RATS_ERR_NOT_ENABLED`, `RATS_ERR_ALREADY_STARTED`).
   Pure getters return their value directly.
 - **Threading is the same as C++:** callbacks fire on a reactor thread — don't
   block in them.
 
-The Node.js (`nodejs/`), Java/Python (`bindings/`, `python/`) and Android
-(`android/`) wrappers all sit on top of this C ABI. **The rule for contributors:**
+The Node.js (`nodejs/`), Python (`python/`) and Java/Android (`android/`)
+wrappers all sit on top of this C ABI, and so do the two mobile packages: React
+Native (`react-native/`) is one C++ Nitro Modules `HybridObject` shared by iOS
+and Android, and iOS (`ios/`) builds the core into an `XCFramework` whose C ABI
+Swift imports directly. **The rule for contributors:**
 when you add a public C++ capability that should be reachable from other languages,
 surface it through this C API (typically as a `rats_enable_*` plus a few calls) and
 keep the language wrappers in sync.
@@ -621,7 +639,7 @@ The directory tree mirrors the layers in this document:
 |-----------|----------|
 | `src/librats/core` | sockets, buffers, `IOPoller`, MPSC/timer queues, `EventBus`, `ServiceRegistry` |
 | `src/librats/wire` | two-level framing + `MessageRouter` |
-| `src/librats/transport` | `ReactorPool`, `Reactor`, `Connection` state machine, the `Link` abstraction and its two transports (`TcpLink`; `UdpStream` + `UdpMux`) |
+| `src/librats/transport` | `ReactorPool`, `Reactor`, `Connection` state machine, the `Link` abstraction and its implementations (`TcpLink`; `UdpStream` + `UdpMux`; `RelayLink` + `Circuit`) |
 | `src/librats/security` | `Identity`, `Handshaker`/`Session`, Noise & plaintext providers |
 | `src/librats/peer` | self-certifying `PeerId`, `PeerTable`, `Peer` handle |
 | `src/librats/node` | the `Node` facade, `NodeContext`, `PeerNetwork`, the transport-choosing `Dialer`, identify, host events |
@@ -634,6 +652,8 @@ The directory tree mirrors the layers in this document:
 | `src/librats/storage` | distributed KV store (gated by `RATS_STORAGE`) |
 | `src/librats/bindings` | the C ABI all FFI bindings build on |
 | `tests/` | GoogleTest suites — one `test_*.cpp` per area |
+| `bench/` | benchmark suites (see `bench/README.md`) |
+| `nodejs/`, `python/`, `android/`, `react-native/`, `ios/` | the language bindings and mobile packages, all over the C ABI |
 
 ---
 
